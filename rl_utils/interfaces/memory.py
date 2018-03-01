@@ -71,7 +71,7 @@ class DequeMemory(Memory):
         self._episodes.append(Episode(state))
 
     def sample_episode(self):
-        return np.random.choice(self._episodes)
+        return self._episodes[np.random.randint(0, len(self._episodes))]
 
     def last_state(self):
         return self.last_episode().states[-1]

@@ -1,4 +1,5 @@
-# Mostly copy-pasted from https://github.com/openai/baselines/blob/master/baselines/common/atari_wrappers.py
+# some wrappers ideas were taken from
+# https://github.com/openai/baselines/blob/master/baselines/common/atari_wrappers.py
 import numpy as np
 from collections import deque
 import gym
@@ -31,10 +32,10 @@ class NoopResetEnv(gym.Wrapper):
         """Sample initial states by taking random number of no-ops on reset.
         No-op is assumed to be action 0.
         """
-        super(NoopResetEnv, self).__init__(env)
+        super().__init__(env)
         self.noop_max = noop_max
         self.override_num_noops = None
-        assert env.unwrapped.get_action_meanings()[0] == 'NOOP'
+        self.noop = env.unwrapped.get_action_meanings().index('NOOP')
 
     def reset(self):
         """ Do no-op action for a number of steps in [1, noop_max]."""
@@ -46,7 +47,7 @@ class NoopResetEnv(gym.Wrapper):
         assert noops > 0
         obs = None
         for _ in range(noops):
-            obs, _, done, _ = self.env.step(0)
+            obs, _, done, _ = self.env.step(self.noop)
             if done:
                 obs = self.env.reset()
         return obs
@@ -55,18 +56,19 @@ class NoopResetEnv(gym.Wrapper):
 class FireResetEnv(gym.Wrapper):
     def __init__(self, env=None):
         """For environments where the user need to press FIRE for the game to start."""
-        super(FireResetEnv, self).__init__(env)
-        assert env.unwrapped.get_action_meanings()[1] == 'FIRE'
-        assert len(env.unwrapped.get_action_meanings()) >= 3
+        super().__init__(env)
+        self.fire_action = env.unwrapped.get_action_meanings().index('FIRE')
+        # assert len(env.unwrapped.get_action_meanings()) >= 3
 
     def reset(self):
         self.env.reset()
-        obs, _, done, _ = self.env.step(1)
+        obs, _, done, _ = self.env.step(self.fire_action)
         if done:
             self.env.reset()
-        obs, _, done, _ = self.env.step(2)
-        if done:
-            self.env.reset()
+        # TODO: is it necessary
+        # obs, _, done, _ = self.env.step(2)
+        # if done:
+        #     self.env.reset()
         return obs
 
 
@@ -75,9 +77,10 @@ class EpisodicLifeEnv(gym.Wrapper):
         """Make end-of-life == end-of-episode, but only reset on true game over.
         Done by DeepMind for the DQN and co. since it helps value estimation.
         """
-        super(EpisodicLifeEnv, self).__init__(env)
+        super().__init__(env)
         self.lives = 0
         self.was_real_done = True
+        self.noop = env.unwrapped.get_action_meanings().index('NOOP')
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
@@ -101,9 +104,8 @@ class EpisodicLifeEnv(gym.Wrapper):
         if self.was_real_done:
             obs = self.env.reset()
         else:
-            # TODO: noop
             # no-op step to advance from terminal/lost life state
-            obs, _, _, _ = self.env.step(0)
+            obs, _, _, _ = self.env.step(self.noop)
         self.lives = self.env.unwrapped.ale.lives()
         return obs
 
@@ -111,13 +113,13 @@ class EpisodicLifeEnv(gym.Wrapper):
 class MaxAndSkipEnv(gym.Wrapper):
     def __init__(self, env=None, skip=4):
         """Return only every `skip`-th frame"""
-        super(MaxAndSkipEnv, self).__init__(env)
+        super().__init__(env)
         # most recent raw observations (for max pooling across time steps)
         self._obs_buffer = deque(maxlen=2)
         self._skip = skip
 
     def step(self, action):
-        total_reward = 0.0
+        total_reward = 0
         done = None
         for _ in range(self._skip):
             obs, reward, done, info = self.env.step(action)
@@ -162,8 +164,9 @@ class FrameStack(gym.Wrapper):
 def to_84(state):
     state = state[:, :, 0] * 0.299 + state[:, :, 1] * 0.587 + state[:, :, 2] * 0.114
     state = cv2.resize(state, (84, 110), interpolation=cv2.INTER_AREA)
+    # TODO: remove and add global/pyramid pooling
     state = state[18:102, :].reshape(1, 84, 84)
-    return (state / 255).astype('float16')
+    return state.astype('uint8')
 
 
 def wrap_dqn(env):
@@ -174,6 +177,6 @@ def wrap_dqn(env):
     env = MaxAndSkipEnv(env, skip=4)
     if 'FIRE' in env.unwrapped.get_action_meanings():
         env = FireResetEnv(env)
-    env = LambdaObservation(env, to_84, spaces.Box(low=0, high=1, shape=(1, 84, 84), dtype=np.float16))
+    env = LambdaObservation(env, to_84, spaces.Box(low=0, high=1, shape=(1, 84, 84), dtype=np.uint8))
     env = LambdaReward(env, np.sign)
     return env

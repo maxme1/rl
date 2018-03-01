@@ -9,7 +9,7 @@ class View(nn.Module):
         self.shape = shape
 
     def forward(self, x):
-        return x.view(*self.shape)
+        return x.view(x.shape[0], *self.shape)
 
 
 def generate_episode(env, policy, max_len=None):

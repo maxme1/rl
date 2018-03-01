@@ -3,8 +3,8 @@ from torch import nn
 from torch.autograd import Variable
 import numpy as np
 
-from .memory import Memory
-from .base import to_var
+from rl_utils.interfaces.memory import Memory
+from rl_utils.interfaces.base import to_var
 
 
 def get_action(predict: Variable):
