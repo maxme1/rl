@@ -32,16 +32,27 @@ class Episode:
 
 
 class Memory(ABC):
+    def __init__(self):
+        self.total_steps = self.total_episodes = 0
+
+    def new_episode(self, state):
+        self.total_episodes += 1
+        return self.start_episode(state)
+
+    def step(self, action, new_state, reward, done, info):
+        self.total_steps += 1
+        return self.make_step(action, new_state, reward, done, info)
+
     @abstractmethod
     def last_episode(self) -> Episode:
         pass
 
     @abstractmethod
-    def step(self, action, new_state, reward, done, info):
+    def make_step(self, action, new_state, reward, done, info):
         pass
 
     @abstractmethod
-    def new_episode(self, state):
+    def start_episode(self, state):
         pass
 
     @abstractmethod
@@ -59,15 +70,16 @@ class Memory(ABC):
 
 class DequeMemory(Memory):
     def __init__(self, max_episodes=None):
+        super().__init__()
         self._episodes: Deque[Episode] = deque(maxlen=max_episodes)
 
     def last_episode(self):
         return self._episodes[-1]
 
-    def step(self, action, new_state, reward, done, info):
+    def make_step(self, action, new_state, reward, done, info):
         self.last_episode().step(action, new_state, reward, done, info)
 
-    def new_episode(self, state):
+    def start_episode(self, state):
         self._episodes.append(Episode(state))
 
     def sample_episode(self):
@@ -92,10 +104,10 @@ class FrameLimitMemory(DequeMemory):
             episode = self._episodes.popleft()
             self.frames -= len(episode.states)
 
-    def step(self, action, new_state, reward, done, info):
-        super().step(action, new_state, reward, done, info)
+    def make_step(self, action, new_state, reward, done, info):
+        super().make_step(action, new_state, reward, done, info)
         self._step()
 
-    def new_episode(self, state):
-        super().new_episode(state)
+    def start_episode(self, state):
+        super().start_episode(state)
         self._step()

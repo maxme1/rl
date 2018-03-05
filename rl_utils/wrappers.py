@@ -4,7 +4,6 @@ import numpy as np
 from collections import deque
 import gym
 from gym import spaces
-import cv2
 
 
 class LambdaObservation(gym.ObservationWrapper):
@@ -58,17 +57,36 @@ class FireResetEnv(gym.Wrapper):
         """For environments where the user need to press FIRE for the game to start."""
         super().__init__(env)
         self.fire_action = env.unwrapped.get_action_meanings().index('FIRE')
-        # assert len(env.unwrapped.get_action_meanings()) >= 3
+
+    def reset(self):
+        self.env.reset()
+        s, _, done, _ = self.env.step(self.fire_action)
+        if done:
+            s = self.env.reset()
+        return s
+
+
+class FireAfterLoss(gym.Wrapper):
+    def __init__(self, env=None):
+        super().__init__(env)
+        self.fire_action = env.unwrapped.get_action_meanings().index('FIRE')
+        self.lives = 0
+
+    def step(self, action):
+        state, reward, done, info = self.env.step(action)
+        lives = self.env.unwrapped.ale.lives()
+        if lives < self.lives:
+            state, rew, done, info = self.env.step(self.fire_action)
+            reward += rew
+        self.lives = lives
+        return state, reward, done, info
 
     def reset(self):
         self.env.reset()
         obs, _, done, _ = self.env.step(self.fire_action)
         if done:
-            self.env.reset()
-        # TODO: is it necessary
-        # obs, _, done, _ = self.env.step(2)
-        # if done:
-        #     self.env.reset()
+            obs = self.env.reset()
+        self.lives = self.unwrapped.ale.lives()
         return obs
 
 
@@ -159,24 +177,3 @@ class FrameStack(gym.Wrapper):
         s, reward, done, info = self.env.step(action)
         self.frames.append(s)
         return np.concatenate(self.frames), reward, done, info
-
-
-def to_84(state):
-    state = state[:, :, 0] * 0.299 + state[:, :, 1] * 0.587 + state[:, :, 2] * 0.114
-    state = cv2.resize(state, (84, 110), interpolation=cv2.INTER_AREA)
-    # TODO: remove and add global/pyramid pooling
-    state = state[18:102, :].reshape(1, 84, 84)
-    return state.astype('uint8')
-
-
-def wrap_dqn(env):
-    """Apply a common set of wrappers for Atari games."""
-    assert 'NoFrameskip' in env.spec.id
-    env = EpisodicLifeEnv(env)
-    env = NoopResetEnv(env, noop_max=30)
-    env = MaxAndSkipEnv(env, skip=4)
-    if 'FIRE' in env.unwrapped.get_action_meanings():
-        env = FireResetEnv(env)
-    env = LambdaObservation(env, to_84, spaces.Box(low=0, high=1, shape=(1, 84, 84), dtype=np.uint8))
-    env = LambdaReward(env, np.sign)
-    return env

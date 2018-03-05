@@ -1,5 +1,5 @@
 import argparse
-import os
+from os.path import join as jp
 import threading
 from functools import partial
 from queue import Queue, Empty
@@ -10,6 +10,7 @@ from tensorboard_easy import Logger
 
 from rl_utils.interfaces.base import make_step, tb_logger
 from rl_utils.interfaces.memory import Memory
+from dpipe.torch.model import set_lr
 
 
 def make_history(queue: Queue, env, agent, mem: Memory, prepare_last_state, get_action, logger):
@@ -23,20 +24,18 @@ def make_history(queue: Queue, env, agent, mem: Memory, prepare_last_state, get_
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('config_path')
 parser.add_argument('experiment_path')
 args = parser.parse_args()
 
-rm = read_config(args.config_path)
-os.makedirs(args.experiment_path)
-rm.save_config(os.path.join(args.experiment_path, 'resources.config'))
-log_path = os.path.join(args.experiment_path, 'logs')
-model_path = os.path.join(args.experiment_path, 'model')
-os.makedirs(model_path)
+config_path = jp(args.experiment_path, 'resources.config')
+log_path = jp(args.experiment_path, 'logs')
+model_path = jp(args.experiment_path, 'model')
+rm = read_config(config_path)
 
 logger = Logger(log_path)
 log_rewards = logger.make_log_scalar('rewards')
 log_disc_rewards = logger.make_log_scalar('discounted_rewards')
+log_lr = logger.make_log_scalar('lr')
 logger = partial(tb_logger, log_rewards=log_rewards, log_disc_rewards=log_disc_rewards, gamma=rm.gamma)
 
 optimizer = rm.optimizer
@@ -50,9 +49,12 @@ p.start()
 
 try:
     while True:
-        # TODO: dangerous
-        if not memory.empty():
+        if memory.total_steps >= rm.min_steps:
             loss = rm.calculate_loss(agent, memory, rm.train_batch)
+
+            if rm.get_lr is not None:
+                set_lr(optimizer, rm.get_lr(memory))
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
