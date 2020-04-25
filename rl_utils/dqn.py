@@ -1,131 +1,69 @@
-import torch.nn.functional
-from gym import spaces
-from torch import nn
-from torch.autograd import Variable
 import numpy as np
-import cv2
+import torch
+from torch.nn import functional
 
-from rl_utils.interfaces.memory import Memory
-from rl_utils.interfaces.base import to_var
-from rl_utils.utils import View
-from rl_utils.wrappers import EpisodicLifeEnv, NoopResetEnv, MaxAndSkipEnv, FireResetEnv, LambdaObservation, \
-    LambdaReward, FireAfterLoss
-
-
-def get_action(predict: Variable):
-    return predict.data.cpu().numpy().argmax()
+from dpipe.im.checks import check_shape_along_axis
+from dpipe.itertools import lmap
+from dpipe.torch import to_var, to_np, set_params
+from rl_utils.memory import Memory
+from rl_utils.utils import discount_rewards
 
 
-def epsilon_greedy_action(x, get_eps, sampler, get_action=get_action):
-    if np.random.binomial(1, get_eps()):
-        return sampler()
-    return get_action(x)
+def q_update(states, actions, rewards, done, *, gamma, agent, target_agent=None, optimizer, max_grad_norm=None,
+             norm_type='inf', **optimizer_params):
+    check_shape_along_axis(actions, rewards, axis=1)
+    n_steps = actions.shape[1]
+    assert n_steps > 0
+    assert states.shape[1] == n_steps + 1
 
-
-def exponential_lr(memory: Memory, initial, multiplier, step_length, floordiv=True):
-    if floordiv:
-        exp = memory.total_episodes // step_length
+    agent.train()
+    if target_agent is None:
+        target_agent = agent
     else:
-        exp = memory.total_episodes / step_length
-    return initial * multiplier ** exp
+        target_agent.eval()
+
+    # first and last state
+    start, stop = states[:, 0], states[:, -1]
+    # discounted rewards
+    rewards = discount_rewards(np.moveaxis(rewards, 1, 0), gamma)
+    actions = actions[:, [0]]
+    gamma = gamma ** n_steps
+
+    start, stop, actions, rewards, done = to_var(start, stop, actions, rewards, done, device=agent)
+
+    predicted = agent(start).gather(1, actions).squeeze(1)
+    with torch.no_grad():
+        values = target_agent(stop).detach().max(1).values
+        expected = (1 - done.to(values)) * values * gamma + rewards
+
+    loss = functional.mse_loss(predicted, expected)
+    set_params(optimizer, **optimizer_params)
+    optimizer.zero_grad()
+    loss.backward()
+    if max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm, norm_type)
+
+    optimizer.step()
+    return to_np(loss)
 
 
-def prepare_batch(mem: Memory, size):
-    episode = mem.last_episode()
-    state = episode.states[-size:]
-    state = np.concatenate(state)
-    state = complete_stack(state, size)
-    return to_var(state[None].astype('float32'))
+@torch.no_grad()
+def get_q_values(state, agent):
+    return to_np(agent(to_var(state[None], device=agent)))[0]
 
 
-def complete_stack(stack, size):
-    if len(stack) < size:
-        # TODO: pad
-        stack = np.concatenate([np.zeros((size - len(stack), *stack.shape[1:])), stack])
-    return stack
+def describe_dqn(memory: Memory, agent, gamma: float = 1):
+    state = memory.sample_episode().state(0)
+    rewards = [e.rewards() for e in memory.episodes()]
 
+    sizes = np.array(lmap(len, rewards))
+    discounted = np.array([discount_rewards(r, gamma) for r in rewards])
+    summed = np.array([discount_rewards(r, 1) for r in rewards])
+    q_values = get_q_values(state, agent)
 
-def sample_stack(mem, stack_size):
-    while True:
-        episode = mem.sample_episode()
-        if len(episode.actions) > 0:
-            break
-
-    idx = np.random.randint(0, max(len(episode.actions) - stack_size, 1))
-    s, a, r, d = episode.get_slice(idx, stack_size)
-    s = np.concatenate(s)
-    begin = complete_stack(s[:-1], stack_size)
-    end = complete_stack(s[1:], stack_size)
-    return [begin, end], [a[-1]], [r[-1]], d
-
-
-def prepare_train_batch(mem: Memory, batch_size, stack_size):
-    states, *other = [*zip(*[sample_stack(mem, stack_size) for _ in range(batch_size)])]
-    states = np.float32(states)
-    return (states.reshape(-1, *states.shape[2:]), *other)
-
-
-def calculate_loss(agent: nn.Module, mem: Memory, prepare_batch, gamma):
-    states, actions, rewards, done = prepare_batch(mem)
-    b, e = to_var(states[::2]), to_var(states[1::2], volatile=True)
-    actions = to_var(actions)
-    rewards = to_var(rewards).float().squeeze()
-    done = torch.ByteTensor(done).cuda()
-
-    begin, end = agent(b).gather(1, actions), agent(e).max(1)[0]
-    end[done] = 0
-    end.volatile = False
-
-    return nn.functional.mse_loss(begin, rewards + gamma * end)
-
-
-class DQN(nn.Module):
-    def __init__(self, input_channels, n_actions, n_features=3136):
-        super().__init__()
-
-        self.net = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            View(n_features),
-            nn.Linear(n_features, 512),
-            nn.ReLU(),
-            nn.Linear(512, n_actions)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-def to_84(state):
-    state = state[:, :, 0] * 0.299 + state[:, :, 1] * 0.587 + state[:, :, 2] * 0.114
-    state = cv2.resize(state, (84, 110), interpolation=cv2.INTER_AREA)
-    # TODO: remove and add global/pyramid pooling
-    state = state[18:102, :].reshape(1, 84, 84)
-    return state.astype('uint8')
-
-
-def wrap_dqn(env):
-    """Apply a common set of wrappers for Atari games."""
-    assert 'NoFrameskip' in env.spec.id
-    env = EpisodicLifeEnv(env)
-    env = NoopResetEnv(env, noop_max=30)
-    env = MaxAndSkipEnv(env, skip=4)
-    if 'FIRE' in env.unwrapped.get_action_meanings():
-        env = FireResetEnv(env)
-    env = LambdaObservation(env, to_84, spaces.Box(low=0, high=255, shape=(1, 84, 84), dtype=np.uint8))
-    env = LambdaReward(env, np.sign)
-    return env
-
-
-def wrap_breakout(env):
-    assert 'NoFrameskip' in env.spec.id
-    env = FireAfterLoss(env)
-    env = NoopResetEnv(env, noop_max=30)
-    env = MaxAndSkipEnv(env, skip=4)
-    env = LambdaObservation(env, to_84, spaces.Box(low=0, high=255, shape=(1, 84, 84), dtype=np.uint8))
-    env = LambdaReward(env, np.sign)
-    return env
+    return {
+        'mean reward': discounted.mean(), 'rewards': discounted[None],
+        'mean reward sum': summed.mean(), 'rewards sum': summed[None],
+        'mean size': sizes.mean(), 'sizes': sizes[None],
+        'q_max': q_values.max(), 'q_min': q_values.min(),
+    }
