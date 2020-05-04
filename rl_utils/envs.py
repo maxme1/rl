@@ -6,6 +6,21 @@ import gym
 from dpipe.im.utils import identity
 
 
+class RecordStates(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.history = []
+
+    def step(self, action):
+        state, reward, done, info = self.env.step(action)
+        self.history.append(state)
+        return state, reward, done, info
+
+    def reset(self, *args, **kwargs):
+        self.history = [self.env.reset(*args, **kwargs)]
+        return self.history[0]
+
+
 class LambdaWrapper(gym.Wrapper):
     def __init__(self, env, change_state=identity, change_reward=identity, change_action=identity):
         super().__init__(env)
@@ -14,15 +29,15 @@ class LambdaWrapper(gym.Wrapper):
         self.change_state = change_state
 
     def reset(self, *args, **kwargs):
-        return self.change_state(self.env.reset(**kwargs))
+        return self.change_state(self.env.reset(*args, **kwargs))
 
     def step(self, action):
         state, reward, done, info = self.env.step(self.change_action(action))
         return self.change_state(state), self.change_reward(reward), done, info
 
 
-class NoopResetEnv(gym.Wrapper):
-    def __init__(self, env=None, noop_max=30):
+class NoopReset(gym.Wrapper):
+    def __init__(self, env, noop_max=30):
         """Sample initial states by taking random number of no-ops on reset.
         No-op is assumed to be action 0.
         """
@@ -47,7 +62,7 @@ class NoopResetEnv(gym.Wrapper):
         return obs
 
 
-class FireResetEnv(gym.Wrapper):
+class FireReset(gym.Wrapper):
     def __init__(self, env=None):
         """For environments where the user need to press FIRE for the game to start."""
         super().__init__(env)
@@ -127,6 +142,7 @@ class FrameSkip(gym.Wrapper):
     def __init__(self, env, n_frames):
         """Return only every `n_frames`-th frame"""
         super().__init__(env)
+        assert n_frames > 0
         self.n_frames = n_frames
 
     def step(self, action):
@@ -140,17 +156,24 @@ class FrameSkip(gym.Wrapper):
         return state, total_reward, done, info
 
 
-class FrameStack(gym.Wrapper):
-    def __init__(self, env, n_frames):
-        super().__init__(env)
-        self._frames = ()
-        self.num_frames = n_frames
-
-    def reset(self):
-        self._frames = (self.env.reset(),) * self.num_frames
-        return self._frames
+class MaxAndSkip(gym.Wrapper):
+    def __init__(self, env, skip_size, pooling_size):
+        """Return only every `skip`-th frame"""
+        gym.Wrapper.__init__(self, env)
+        assert pooling_size <= skip_size
+        self.pooling_size = pooling_size
+        self._skip = skip_size
 
     def step(self, action):
-        s, reward, done, info = self.env.step(action)
-        self._frames = self._frames[1:] + (s,)
-        return self._frames, reward, done, info
+        """Repeat action, sum reward, and max over last observations."""
+        total_reward = 0
+        pooling = []
+        for i in range(self._skip):
+            state, reward, done, info = self.env.step(action)
+            total_reward += reward
+            pooling.append(state)
+            if done:
+                break
+
+        state = np.max(pooling[-self.pooling_size:], 0)
+        return state, total_reward, done, info

@@ -1,8 +1,9 @@
 import numpy as np
 import torch
+from torch import nn
 from torch.nn import functional
 
-from dpipe.im.checks import check_shape_along_axis
+from dpipe.checks import check_shape_along_axis
 from dpipe.itertools import lmap
 from dpipe.torch import to_var, to_np, set_params
 from rl_utils.memory import Memory
@@ -67,3 +68,18 @@ def describe_dqn(memory: Memory, agent, gamma: float = 1):
         'mean size': sizes.mean(), 'sizes': sizes[None],
         'q_max': q_values.max(), 'q_min': q_values.min(),
     }
+
+
+class NoisyLinear(nn.Linear):
+    def __init__(self, in_features: int, out_features: int, sigma: float, bias: bool = True):
+        super().__init__(in_features, out_features, bias)
+        self.noisy_weight = nn.Parameter(torch.full_like(self.weight, sigma, requires_grad=True))
+        self.noisy_bias = nn.Parameter(torch.full_like(self.bias, sigma, requires_grad=True)) if bias else None
+
+    def forward(self, x):
+        weight = self.weight + self.noisy_weight * torch.randn_like(self.noisy_weight)
+        bias = self.bias
+        if bias is not None:
+            bias = bias + self.noisy_bias * torch.randn_like(self.noisy_bias)
+
+        return functional.linear(x, weight, bias)

@@ -1,6 +1,6 @@
 import time
 from abc import ABC, abstractmethod
-from threading import Lock
+from threading import RLock
 from typing import Iterable
 
 import numpy as np
@@ -103,8 +103,9 @@ class Memory(ABC):
     def add_episode(self, episode: Episode):
         pass
 
+    @property
     @abstractmethod
-    def full(self) -> bool:
+    def size(self) -> bool:
         pass
 
     def sample(self, size: int, min_size=None, wait=True):
@@ -119,12 +120,12 @@ class Memory(ABC):
         pass
 
 
+# TODO: remove max_size
 class ExpirationMemory(Memory):
-    def __init__(self, max_size, max_fraction=1):
+    def __init__(self, max_fraction=1):
         self.max_fraction = max_fraction
-        self.max_size = max_size
         self._episodes = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def add_episode(self, episode):
         with self._lock:
@@ -139,14 +140,11 @@ class ExpirationMemory(Memory):
                 time.sleep(1)
 
         with self._lock:
-            episodes = list(self._episodes.items())
-
-            weights = np.array([len(episode) / (counts or 1) for episode, counts in episodes])
-            idx = np.random.choice(len(weights), p=weights / weights.sum())
-            episode, _ = episodes[idx]
+            idx = np.random.randint(len(self._episodes))
+            episode = list(self._episodes)[idx]
 
             self._episodes[episode] += 1
-            if self._episodes[episode] / len(episode) >= self.max_fraction:
+            if self._episodes[episode] >= self.max_fraction * len(episode):
                 self._episodes.pop(episode)
 
             return episode
@@ -159,6 +157,3 @@ class ExpirationMemory(Memory):
     def size(self):
         with self._lock:
             return sum(map(len, self._episodes.keys()))
-
-    def full(self) -> bool:
-        return self.size >= self.max_size
